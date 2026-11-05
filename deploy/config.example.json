@@ -1,0 +1,9 @@
+{
+  "listen": "127.0.0.1:8787",
+  "data_dir": "/var/lib/whatsapp-archive",
+  "token_file": "/var/lib/whatsapp-archive/mcp.token",
+  "allowed_chats": [],
+  "retention_days": 90,
+  "max_messages_per_chat": 10000,
+  "max_results": 100
+}

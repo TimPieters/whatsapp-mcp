@@ -1,0 +1,43 @@
+[Unit]
+Description=Read-only WhatsApp archive MCP
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=whatsapp-archive
+Group=whatsapp-archive
+WorkingDirectory=/var/lib/whatsapp-archive
+ExecStart=/usr/local/bin/whatsapp-bridge serve --config /etc/whatsapp-archive/config.json
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=30
+UMask=0077
+LimitCORE=0
+StateDirectory=whatsapp-archive
+StateDirectoryMode=0700
+Environment=GOMEMLIMIT=256MiB
+MemoryAccounting=true
+MemoryHigh=384M
+MemoryMax=512M
+MemorySwapMax=0
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/whatsapp-archive
+ReadWritePaths=/var/lib/whatsapp-archive
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
