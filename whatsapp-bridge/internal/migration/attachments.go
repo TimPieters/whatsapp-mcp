@@ -136,7 +136,7 @@ func validDirectPath(value string) bool {
 	if err != nil || u.IsAbs() || u.Host != "" || u.User != nil || u.Fragment != "" || u.Opaque != "" {
 		return false
 	}
-	if !strings.HasPrefix(u.Path, "/v/") && !strings.HasPrefix(u.Path, "/mms/") {
+	if !strings.HasPrefix(u.Path, "/v/") && !strings.HasPrefix(u.Path, "/mms/") && !strings.HasPrefix(u.Path, "/o1/v/") {
 		return false
 	}
 	if strings.Contains(u.Path, "\\") || strings.IndexFunc(u.Path, unicode.IsControl) >= 0 {

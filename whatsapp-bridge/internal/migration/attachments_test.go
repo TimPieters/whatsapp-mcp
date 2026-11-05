@@ -141,15 +141,39 @@ func TestMediaPathsRejectArbitraryHostsAndAuthority(t *testing.T) {
 			t.Fatalf("accepted unsafe source URL %q", value)
 		}
 	}
-	for _, value := range []string{"//evil.example/v/a", "https://evil.example/v/a", "/v/../a", "/v/%2e%2e/a", "/v/a#fragment", "/v/a\\b", "/v/a\nb", "/v/%0ab", "/mms/./file", "/other/file"} {
+	for _, value := range []string{"//evil.example/v/a", "https://evil.example/v/a", "/v/../a", "/v/%2e%2e/a", "/v/a#fragment", "/v/a\\b", "/v/a\nb", "/v/%0ab", "/mms/./file", "/o1/v/../private", "/o1/v/%2e%2e/private", "/other/file"} {
 		if validDirectPath(value) {
 			t.Fatalf("accepted unsafe path %q", value)
 		}
 	}
-	for _, value := range []string{"https://mmg.whatsapp.net/v/a.enc?token=1", "https://media.fbcdn.net/mms/a.enc?token=1"} {
+	for _, value := range []string{"https://mmg.whatsapp.net/v/a.enc?token=1", "https://media.fbcdn.net/mms/a.enc?token=1", "https://mmg.whatsapp.net/o1/v/a.enc?token=1"} {
 		if _, ok := directPathFromURL(value); !ok {
 			t.Fatalf("rejected legitimate CDN path %q", value)
 		}
+	}
+}
+
+func TestModernCDNPathSurvivesSelectedMigration(t *testing.T) {
+	ref := referenceFixture()
+	ref.DirectPath = "/o1/v/t24/f2/fixture.enc?token=fixture"
+	row := sourceMedia{url: sql.NullString{String: "https://mmg.whatsapp.net" + ref.DirectPath, Valid: true}, filename: sql.NullString{String: ref.Filename, Valid: true}, key: ref.MediaKey, hash: ref.FileSHA256, encHash: ref.FileEncSHA256, length: sql.NullInt64{Int64: ref.FileLength, Valid: true}}
+	got, ok := row.reference(ref.MediaType, archive.MaxSupportedAttachmentBytes)
+	if !ok || got.DirectPath != ref.DirectPath {
+		t.Fatal("modern CDN path lost during source conversion")
+	}
+	record := exportRecord{Message: archive.Message{ID: "modern-path", ChatJID: approvedChat, Sender: "123", MediaType: ref.MediaType, Timestamp: time.Now().Unix()}, Reference: got}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, _ := testArchive(t)
+	report, err := ImportJSONL(context.Background(), bytes.NewReader(append(data, '\n')), store)
+	if err != nil || report.AttachmentRefs != 1 {
+		t.Fatalf("modern path import %+v %v", report, err)
+	}
+	jobs, err := store.PendingAttachments(1)
+	if err != nil || len(jobs) != 1 || jobs[0].Descriptor.DirectPath != ref.DirectPath {
+		t.Fatal("modern CDN path did not reach private download descriptor")
 	}
 }
 
