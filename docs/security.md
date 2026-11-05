@@ -2,7 +2,7 @@
 
 ## Access boundary
 
-The daemon exposes only four read-only MCP tools over `/mcp`. Every HTTP request requires the configured bearer token. Pairing, allowlist changes, imports, exports, and process administration are local owner operations. There is no HTTP route for pairing images or raw database access.
+The daemon exposes six read-only MCP tools and attachment resources over `/mcp`, plus streamed attachment reads through `/attachments`. Every HTTP request requires the configured bearer token. Pairing, allowlist changes, imports, exports, and process administration are local owner operations. There is no HTTP route for pairing images or raw database access.
 
 Deploy the daemon under a dedicated service account. That account owns the private state directory with mode `0700`; generated secrets and pairing images use mode `0600`. The configuration should be owned by the administrator, readable by the service group, and unwritable by the service account. The agent receives only its token and access to the HTTP endpoint. Do not add its operating-system account to the service group or give it shell/sudo access as the service owner.
 
@@ -25,10 +25,12 @@ The daemon polls configuration every five seconds. Once a valid update is applie
 | Location | Contents | Access |
 | --- | --- | --- |
 | Searchable archive database | Approved message IDs, chat/sender JIDs, text/captions, timestamps, direction and media type | Private service account; mediated MCP reads |
+| Attachment references in archive database | Approved filenames, MIME types, sizes, download paths, media decryption keys and integrity hashes | Private service account; public responses omit download paths, keys and hashes |
+| Private attachment cache | Downloaded approved file content and temporary in-flight downloads | Private service account; mediated authenticated reads |
 | `session.db` | Linked-device identity, encryption keys/sessions, app-state synchronization state, phone-number/linked-identity mappings | Private service account only |
 | Token file | Random bearer credential | Private service owner and intentionally provisioned clients |
 | Temporary `pairing.png` | Current pairing QR | Private service owner only; removed after pairing |
-| Migration JSONL | Selected approved historical records | Trusted administrator; outside agent-accessible storage |
+| Migration JSONL | Selected approved historical records and optional private media references | Trusted administrator; outside agent-accessible storage |
 
 The linked-device session is account-wide. The library may receive, decrypt, and handle nonapproved traffic in process memory before the application sees an event. Protocol state can contain identifiers and cryptographic records for nonapproved peers. This implementation does not promise that unapproved traffic never enters memory or that protocol state is restricted to approved peers.
 
@@ -36,11 +38,13 @@ Contact-name, chat-setting, message-secret, privacy-token, and decrypted-event s
 
 ## Message and retention behavior
 
-There are no application-level user-message send, reaction, presence, read-receipt, or media-download operations. Necessary linked-device authentication, cryptographic, delivery acknowledgment, and synchronization traffic still occurs. This is read-only application access, not a receive-only network protocol.
+There are no application-level user-message send, reaction, presence, or read-receipt operations. Approved attachment downloads and necessary linked-device authentication, cryptographic, delivery acknowledgment, and synchronization traffic still occur. This is read-only application access, not a receive-only network protocol.
 
 Initial account-wide history downloads are disabled. New approved messages are archived while connected. A stopped upstream database can supply selected older history through the local migration commands. The application does not guarantee complete history or recovery of every message missed while offline.
 
-View-once messages are skipped. Approved ordinary disappearing-message wrappers are unwrapped, and their text follows local archive retention. The archive does not mirror source expiration or revocation. Media binaries, filenames, thumbnails, download URLs, and media keys are not archived; media captions may be retained.
+View-once messages are skipped. Approved ordinary disappearing-message wrappers are unwrapped, and their text and attachments follow local archive retention. The archive does not mirror source expiration or revocation. Attachment references contain only the fields needed to identify and retrieve the approved file; quoted media and thumbnails are not extracted. Private references never appear in public message results, resources, or retrieval links.
+
+Downloads run one at a time with bounded streaming writes and integrity validation. Temporary files are private. Attachment reads, cache commits, and policy changes share the archive's authorization boundary. Retention and approval removal purge references and cached files. An already-running bounded response can finish before the policy update acquires the archive lock; downloaded client copies are outside the service's control. Cache limits can evict files without deleting their parent messages. Oversized or unavailable files produce status rather than an unlimited download.
 
 Defaults retain 90 days and at most 10,000 messages per chat. Policy application removes disallowed rows and compacts the archive. Secure deletion within this SQLite file does not erase copies from backups, filesystem snapshots, SSD remapping, migration exports, client responses, or operating-system diagnostics. Protect those separately. The example service disables swap for its cgroup and requests no core dumps; verify host policy and cgroup support before relying on either setting.
 

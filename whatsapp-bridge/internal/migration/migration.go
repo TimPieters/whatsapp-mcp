@@ -27,6 +27,9 @@ const MaxLineBytes = 128 * 1024
 
 type Report struct {
 	Exported int `json:"exported"`
+	// AttachmentRefs counts complete private download descriptors, not binaries.
+	AttachmentRefs        int `json:"attachment_refs"`
+	AttachmentRefsSkipped int `json:"attachment_refs_skipped"`
 	// Imported counts valid approved records submitted successfully. Duplicate
 	// replacement, retention, and storage caps can reduce the retained row count.
 	Imported int `json:"imported"`
@@ -68,6 +71,10 @@ func ExportUpstream(ctx context.Context, sourceDB string, cfg config.Config, out
 	}
 	now := time.Now().Unix()
 	cutoff := now - int64(cfg.RetentionDays)*86400
+	mediaColumns, err := sourceMediaColumns(ctx, db)
+	if err != nil {
+		return report, err
+	}
 	for _, chat := range cfg.AllowedChats {
 		if err := ctx.Err(); err != nil {
 			return report, err
@@ -80,7 +87,7 @@ func ExportUpstream(ctx context.Context, sourceDB string, cfg config.Config, out
 			CASE WHEN length(CAST(content AS BLOB))<=65536 THEN content END,
 			CASE WHEN length(CAST(timestamp AS BLOB))<=128 THEN CAST(timestamp AS TEXT) END,
 			CAST(COALESCE(is_from_me,0) AS INTEGER),
-			CASE WHEN length(CAST(COALESCE(media_type,'') AS BLOB))<=64 THEN COALESCE(media_type,'') END
+			CASE WHEN length(CAST(COALESCE(media_type,'') AS BLOB))<=64 THEN COALESCE(media_type,'') END, `+mediaColumns+`
 			FROM messages WHERE chat_jid=? ORDER BY timestamp DESC,id DESC LIMIT ?`, chat.JID, cfg.MaxMessagesPerChat)
 		if err != nil {
 			return report, errors.New("cannot read the source message schema")
@@ -91,8 +98,9 @@ func ExportUpstream(ctx context.Context, sourceDB string, cfg config.Config, out
 				return report, err
 			}
 			var id, sender, text, stamp, media sql.NullString
+			var mediaRow sourceMedia
 			var fromMe int
-			if err := rows.Scan(&id, &sender, &text, &stamp, &fromMe, &media); err != nil {
+			if err := rows.Scan(&id, &sender, &text, &stamp, &fromMe, &media, &mediaRow.directPath, &mediaRow.url, &mediaRow.filename, &mediaRow.mime, &mediaRow.key, &mediaRow.hash, &mediaRow.encHash, &mediaRow.length); err != nil {
 				rows.Close()
 				return report, errors.New("cannot decode a source message row")
 			}
@@ -106,7 +114,15 @@ func ExportUpstream(ctx context.Context, sourceDB string, cfg config.Config, out
 				report.Skipped++
 				continue
 			}
-			data, err := json.Marshal(m)
+			record := exportRecord{Message: m}
+			if m.MediaType != "" {
+				if ref, ok := mediaRow.reference(m.MediaType, archive.MaxSupportedAttachmentBytes); ok {
+					record.Reference = ref
+				} else {
+					report.AttachmentRefsSkipped++
+				}
+			}
+			data, err := json.Marshal(record)
 			if err != nil {
 				rows.Close()
 				return report, errors.New("cannot encode an export record")
@@ -124,6 +140,9 @@ func ExportUpstream(ctx context.Context, sourceDB string, cfg config.Config, out
 				return report, io.ErrShortWrite
 			}
 			report.Exported++
+			if record.Reference != nil {
+				report.AttachmentRefs++
+			}
 		}
 		err = rows.Err()
 		rows.Close()
@@ -154,6 +173,7 @@ func ImportJSONL(ctx context.Context, in io.Reader, store *archive.Store) (Repor
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 4096), MaxLineBytes+2)
 	batch := make([]archive.Message, 0, 100)
+	refs := make(map[referenceKey]pendingReference)
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
@@ -161,11 +181,19 @@ func ImportJSONL(ctx context.Context, in io.Reader, store *archive.Store) (Repor
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := store.Ingest(batch); err != nil {
+		attachments := make([]archive.AttachmentRecord, 0, len(refs))
+		for _, item := range refs {
+			attachments = append(attachments, archive.AttachmentRecord{ChatJID: item.chat, MessageID: item.id, Descriptor: item.ref.descriptor()})
+		}
+		if err := store.IngestWithAttachments(batch, attachments); err != nil {
 			return errors.New("archive rejected an import batch")
 		}
+		// Counts describe accepted input. Retention or a narrower concurrent policy
+		// can discard rows and their descriptors before they are retained.
+		report.AttachmentRefs += len(refs)
 		report.Imported += len(batch)
 		batch = batch[:0]
+		clear(refs)
 		return nil
 	}
 	line := 0
@@ -191,7 +219,7 @@ func ImportJSONL(ctx context.Context, in io.Reader, store *archive.Store) (Repor
 		if data[0] != '{' {
 			return fail("expected one message object")
 		}
-		m, err := decodeMessage(data)
+		m, rawRef, err := decodeRecord(data)
 		if err != nil {
 			return fail("invalid message JSON")
 		}
@@ -201,6 +229,24 @@ func ImportJSONL(ctx context.Context, in io.Reader, store *archive.Store) (Repor
 		}
 		if !validMessage(m) {
 			return fail("invalid or oversized message fields")
+		}
+		var ref *mediaReference
+		if len(rawRef) > 0 {
+			ref, err = decodeReference(rawRef, m.MediaType)
+			if err != nil {
+				return fail("invalid attachment descriptor")
+			}
+			if err := store.ValidateAttachment(ref.descriptor()); err != nil {
+				return fail("invalid attachment descriptor or unavailable archive")
+			}
+		}
+		// Duplicate message keys use the last valid input record, including an
+		// explicit absence of attachment credentials. An earlier descriptor in
+		// this same batch must not survive a later text-only replacement.
+		key := referenceKey{m.ChatJID, m.ID}
+		delete(refs, key)
+		if ref != nil {
+			refs[key] = pendingReference{chat: m.ChatJID, id: m.ID, ref: *ref}
 		}
 		batch = append(batch, m)
 		if len(batch) == 100 {
@@ -219,47 +265,51 @@ func ImportJSONL(ctx context.Context, in io.Reader, store *archive.Store) (Repor
 	return report, nil
 }
 
-func decodeMessage(data []byte) (archive.Message, error) {
+func decodeRecord(data []byte) (archive.Message, json.RawMessage, error) {
 	var m archive.Message
+	var ref json.RawMessage
 	if !utf8.Valid(data) {
-		return m, errors.New("invalid JSON")
+		return m, nil, errors.New("invalid JSON")
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if token, err := dec.Token(); err != nil || token != json.Delim('{') {
-		return m, errors.New("invalid JSON")
+		return m, nil, errors.New("invalid JSON")
 	}
 	seen := map[string]bool{}
 	for dec.More() {
 		token, err := dec.Token()
 		if err != nil {
-			return m, errors.New("invalid JSON")
+			return m, nil, errors.New("invalid JSON")
 		}
 		key, ok := token.(string)
 		if !ok || seen[key] {
-			return m, errors.New("invalid JSON")
+			return m, nil, errors.New("invalid JSON")
 		}
 		switch key {
-		case "id", "chat_jid", "sender", "text", "media_type", "timestamp", "from_me":
+		case "id", "chat_jid", "sender", "text", "media_type", "timestamp", "from_me", "attachment_ref":
 		default:
-			return m, errors.New("invalid JSON")
+			return m, nil, errors.New("invalid JSON")
 		}
 		seen[key] = true
 		var value json.RawMessage
 		if err := dec.Decode(&value); err != nil || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-			return m, errors.New("invalid JSON")
+			return m, nil, errors.New("invalid JSON")
+		}
+		if key == "attachment_ref" {
+			ref = append(json.RawMessage(nil), value...)
 		}
 	}
 	if _, err := dec.Token(); err != nil {
-		return m, errors.New("invalid JSON")
+		return m, nil, errors.New("invalid JSON")
 	}
 	var trailing any
 	if err := dec.Decode(&trailing); err != io.EOF {
-		return m, errors.New("invalid JSON")
+		return m, nil, errors.New("invalid JSON")
 	}
 	if err := json.Unmarshal(data, &m); err != nil {
-		return m, errors.New("invalid JSON")
+		return m, nil, errors.New("invalid JSON")
 	}
-	return m, nil
+	return m, ref, nil
 }
 
 func validMessage(m archive.Message) bool {

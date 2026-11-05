@@ -19,17 +19,19 @@ type Chat struct {
 }
 
 type Config struct {
-	Listen             string `json:"listen"`
-	DataDir            string `json:"data_dir"`
-	TokenFile          string `json:"token_file"`
-	AllowedChats       []Chat `json:"allowed_chats"`
-	RetentionDays      int    `json:"retention_days"`
-	MaxMessagesPerChat int    `json:"max_messages_per_chat"`
-	MaxResults         int    `json:"max_results"`
+	Listen               string `json:"listen"`
+	DataDir              string `json:"data_dir"`
+	TokenFile            string `json:"token_file"`
+	AllowedChats         []Chat `json:"allowed_chats"`
+	RetentionDays        int    `json:"retention_days"`
+	MaxMessagesPerChat   int    `json:"max_messages_per_chat"`
+	MaxResults           int    `json:"max_results"`
+	MaxAttachmentBytes   int64  `json:"max_attachment_bytes"`
+	AttachmentCacheBytes int64  `json:"attachment_cache_bytes"`
 }
 
 func Default() Config {
-	return Config{Listen: "127.0.0.1:8787", DataDir: "data", RetentionDays: 90, MaxMessagesPerChat: 10000, MaxResults: 100}
+	return Config{Listen: "127.0.0.1:8787", DataDir: "data", RetentionDays: 90, MaxMessagesPerChat: 10000, MaxResults: 100, MaxAttachmentBytes: 32 << 20, AttachmentCacheBytes: 1 << 30}
 }
 
 // WithDefaults fills omitted settings. An omitted allowlist remains empty.
@@ -49,6 +51,12 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.MaxResults == 0 {
 		c.MaxResults = d.MaxResults
+	}
+	if c.MaxAttachmentBytes == 0 {
+		c.MaxAttachmentBytes = d.MaxAttachmentBytes
+	}
+	if c.AttachmentCacheBytes == 0 {
+		c.AttachmentCacheBytes = d.AttachmentCacheBytes
 	}
 	return c
 }
@@ -76,6 +84,12 @@ func (c Config) Validate() error {
 	}
 	if c.MaxResults < 1 || c.MaxResults > 1000 {
 		return fmt.Errorf("max_results must be between 1 and 1000")
+	}
+	if c.MaxAttachmentBytes < 1 || c.MaxAttachmentBytes > 128<<20 {
+		return fmt.Errorf("max_attachment_bytes must be between 1 and 134217728")
+	}
+	if c.AttachmentCacheBytes < c.MaxAttachmentBytes+64 || c.AttachmentCacheBytes > 1<<40 {
+		return fmt.Errorf("attachment_cache_bytes must allow one attachment plus 64 bytes and be at most 1099511627776")
 	}
 	if len(c.AllowedChats) > 10000 {
 		return fmt.Errorf("allowed_chats exceeds 10000 entries")

@@ -99,8 +99,8 @@ func TestPairingImageIsCopiedAndExpires(t *testing.T) {
 	}
 }
 
-func TestCollectorDoesNotCallUserWriteOrMediaDownloadAPIs(t *testing.T) {
-	for _, filename := range []string{"collector.go", "ingest.go"} {
+func TestCollectorDoesNotCallUserWriteOrUnboundedDownloadAPIs(t *testing.T) {
+	for _, filename := range []string{"collector.go", "ingest.go", "attachments.go", "media_http.go"} {
 		file, err := parser.ParseFile(token.NewFileSet(), filename, nil, 0)
 		if err != nil {
 			t.Fatal(err)

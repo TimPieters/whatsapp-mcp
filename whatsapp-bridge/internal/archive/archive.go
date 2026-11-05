@@ -27,13 +27,14 @@ var (
 const MaxTextBytes = 64 * 1024
 
 type Message struct {
-	ID        string `json:"id"`
-	ChatJID   string `json:"chat_jid"`
-	Sender    string `json:"sender"`
-	Text      string `json:"text"`
-	MediaType string `json:"media_type,omitempty"`
-	Timestamp int64  `json:"timestamp"`
-	FromMe    bool   `json:"from_me"`
+	ID         string          `json:"id"`
+	ChatJID    string          `json:"chat_jid"`
+	Sender     string          `json:"sender"`
+	Text       string          `json:"text"`
+	MediaType  string          `json:"media_type,omitempty"`
+	Timestamp  int64           `json:"timestamp"`
+	FromMe     bool            `json:"from_me"`
+	Attachment *AttachmentInfo `json:"attachment,omitempty"`
 }
 
 type Chat struct {
@@ -53,12 +54,15 @@ type Stats struct {
 // Store serializes policy updates, reads, and writes. Returning from ApplyConfig
 // means no operation using the previous policy can still complete afterward.
 type Store struct {
-	mu        sync.Mutex
-	db        *sql.DB
-	cfg       config.Config
-	allowed   map[string]string
-	suspended bool
-	closed    bool
+	mu         sync.Mutex
+	db         *sql.DB
+	cfg        config.Config
+	allowed    map[string]string
+	suspended  bool
+	closed     bool
+	cacheDir   string
+	generation uint64
+	flights    map[string]*attachmentFlight
 }
 
 func Open(dbPath string, cfg config.Config) (*Store, error) {
@@ -83,7 +87,7 @@ func Open(dbPath string, cfg config.Config) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, suspended: true}
+	s := &Store{db: db, suspended: true, cacheDir: filepath.Join(filepath.Dir(abs), "attachments"), flights: make(map[string]*attachmentFlight)}
 	fail := func(err error) (*Store, error) { db.Close(); return nil, err }
 	for _, stmt := range []string{
 		"PRAGMA journal_mode=DELETE", "PRAGMA secure_delete=ON", "PRAGMA temp_store=MEMORY", "PRAGMA cache_size=-4096",
@@ -99,6 +103,9 @@ func Open(dbPath string, cfg config.Config) (*Store, error) {
 		}
 	}
 	if err := os.Chmod(abs, 0600); err != nil {
+		return fail(err)
+	}
+	if err := s.initAttachments(); err != nil {
 		return fail(err)
 	}
 	if err := s.ApplyConfig(cfg); err != nil {
@@ -117,7 +124,12 @@ func (s *Store) check() error {
 	return nil
 }
 
-func (s *Store) Suspend() { s.mu.Lock(); defer s.mu.Unlock(); s.suspended = true }
+func (s *Store) Suspend() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.suspended = true
+	s.invalidateAttachmentsLocked()
+}
 
 func (s *Store) IsAllowed(jid string) bool {
 	s.mu.Lock()
@@ -136,6 +148,7 @@ func (s *Store) ApplyConfig(cfg config.Config) error {
 		return ErrClosed
 	}
 	s.suspended = true
+	s.invalidateAttachmentsLocked()
 	cfg = cfg.WithDefaults()
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -187,6 +200,9 @@ func (s *Store) ApplyConfig(cfg config.Config) error {
 	}
 	s.cfg = cfg
 	s.allowed = allowed
+	if err := s.reconcileAttachmentsLocked(); err != nil {
+		return err
+	}
 	s.suspended = false
 	return nil
 }
@@ -197,18 +213,21 @@ func cleanup(tx *sql.Tx, cfg config.Config, now int64) error {
 		return err
 	}
 	for _, chat := range cfg.AllowedChats {
-		if err := capChat(tx, chat.JID, cfg.MaxMessagesPerChat); err != nil {
+		if _, err := capChat(tx, chat.JID, cfg.MaxMessagesPerChat); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func capChat(tx *sql.Tx, jid string, maxMessages int) error {
-	_, err := tx.Exec(`DELETE FROM messages WHERE chat_jid=? AND id IN (
+func capChat(tx *sql.Tx, jid string, maxMessages int) (int64, error) {
+	result, err := tx.Exec(`DELETE FROM messages WHERE chat_jid=? AND id IN (
 		SELECT id FROM messages WHERE chat_jid=?
 		ORDER BY timestamp DESC,id DESC LIMIT -1 OFFSET ?)`, jid, jid, maxMessages)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 // Maintain removes expired rows and checks storage caps without compacting the
@@ -227,12 +246,28 @@ func (s *Store) Maintain() error {
 	if err := cleanup(tx, s.cfg, time.Now().Unix()); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.reconcileAttachmentsLocked()
 }
 
 func (s *Store) Ingest(messages []Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.ingestLocked(messages, nil)
+}
+
+func (s *Store) IngestWithAttachments(messages []Message, refs []AttachmentRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(refs) > 1000 {
+		return errors.New("attachment batch exceeds 1000 records")
+	}
+	return s.ingestLocked(messages, refs)
+}
+
+func (s *Store) ingestLocked(messages []Message, refs []AttachmentRecord) error {
 	if err := s.check(); err != nil {
 		return err
 	}
@@ -247,6 +282,14 @@ func (s *Store) Ingest(messages []Message) error {
 	}
 	defer tx.Rollback()
 	touched := make(map[string]bool)
+	pruned := false
+	type attachmentKey struct{ jid, id string }
+	incoming := make(map[attachmentKey]AttachmentDescriptor, len(refs))
+	for _, ref := range refs {
+		if _, ok := s.allowed[ref.ChatJID]; ok && ValidateAttachmentDescriptor(ref.Descriptor, MaxSupportedAttachmentBytes) == nil {
+			incoming[attachmentKey{ref.ChatJID, ref.MessageID}] = ref.Descriptor
+		}
+	}
 	for _, msg := range messages {
 		// Reject before binding any unapproved message field to SQLite.
 		if _, ok := s.allowed[msg.ChatJID]; !ok {
@@ -271,16 +314,55 @@ func (s *Store) Ingest(messages []Message) error {
 			msg.ID, msg.ChatJID, msg.Sender, msg.Text, msg.MediaType, msg.Timestamp, msg.FromMe); err != nil {
 			return err
 		}
+		deleteSQL := "DELETE FROM attachments WHERE chat_jid=? AND message_id=?"
+		deleteArgs := []any{msg.ChatJID, msg.ID}
+		if descriptor, ok := incoming[attachmentKey{msg.ChatJID, msg.ID}]; ok && descriptor.MediaType == msg.MediaType {
+			deleteSQL += " AND kind<>?"
+			deleteArgs = append(deleteArgs, msg.MediaType)
+		}
+		result, err := tx.Exec(deleteSQL, deleteArgs...)
+		if err != nil {
+			return err
+		}
+		if n, _ := result.RowsAffected(); n > 0 {
+			pruned = true
+		}
 	}
 	for jid := range touched {
-		if _, err := tx.Exec("DELETE FROM messages WHERE chat_jid=? AND timestamp<?", jid, cutoff); err != nil {
+		result, err := tx.Exec("DELETE FROM messages WHERE chat_jid=? AND timestamp<?", jid, cutoff)
+		if err != nil {
 			return err
 		}
-		if err := capChat(tx, jid, s.cfg.MaxMessagesPerChat); err != nil {
+		if n, _ := result.RowsAffected(); n > 0 {
+			pruned = true
+		}
+		if n, err := capChat(tx, jid, s.cfg.MaxMessagesPerChat); err != nil {
+			return err
+		} else if n > 0 {
+			pruned = true
+		}
+	}
+	for _, ref := range refs {
+		if _, ok := s.allowed[ref.ChatJID]; !ok {
+			continue
+		}
+		if ValidateAttachmentDescriptor(ref.Descriptor, MaxSupportedAttachmentBytes) != nil {
+			continue
+		}
+		if err := s.registerAttachmentLocked(tx, ref.ChatJID, ref.MessageID, ref.Descriptor); err != nil {
+			if errors.Is(err, ErrAttachmentUnavailable) {
+				continue
+			}
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if pruned || len(refs) > 0 {
+		return s.cleanOrphanCacheLocked()
+	}
+	return nil
 }
 
 func validSender(sender string) bool {
@@ -397,7 +479,16 @@ func (s *Store) queryMessages(query string, args ...any) ([]Message, error) {
 			out = append(out, m)
 		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	for i := range out {
+		if info, err := s.attachmentInfoLocked(out[i].ChatJID, out[i].ID); err == nil {
+			out[i].Attachment = &info
+		}
+	}
+	return out, nil
 }
 
 func (s *Store) Stats() (Stats, error) {
@@ -444,5 +535,6 @@ func (s *Store) Close() error {
 	}
 	s.closed = true
 	s.suspended = true
+	s.invalidateAttachmentsLocked()
 	return s.db.Close()
 }

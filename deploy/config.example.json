@@ -5,5 +5,7 @@
   "allowed_chats": [],
   "retention_days": 90,
   "max_messages_per_chat": 10000,
-  "max_results": 100
+  "max_results": 100,
+  "max_attachment_bytes": 33554432,
+  "attachment_cache_bytes": 1073741824
 }

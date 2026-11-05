@@ -104,7 +104,7 @@ func TestOnlyReadToolsAndCurrentChatPolicyAreExposed(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"whatsapp_status": true, "list_chats": true, "list_messages": true, "search_messages": true}
+	want := map[string]bool{"whatsapp_status": true, "list_chats": true, "list_messages": true, "search_messages": true, "get_attachment": true, "read_attachment": true}
 	if len(list.Result.Tools) != len(want) {
 		t.Fatalf("unexpected tool count: %s", w.Body.String())
 	}

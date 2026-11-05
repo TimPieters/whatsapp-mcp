@@ -19,7 +19,7 @@ whatsapp-bridge export-upstream --config export-config.json \
   --source stopped-original-messages.db --output allowed-history.jsonl
 ```
 
-Treat the JSONL output as private message content. Verify its selected chat scope through trusted local inspection and transfer it over an encrypted channel. Do not attach it to an issue, commit it, or place it in an agent-readable folder. Transfer only this filtered output, not the original database or linked-device credentials.
+Treat the JSONL output as private message content and attachment credentials. Complete legacy media records include a private `attachment_ref` with the download path, encryption key, integrity hashes, declared size, media type, MIME type, and display filename. These fields belong only in the administrator-controlled transfer and private archive. They are never included in MCP message results. Verify the selected chat scope through trusted local inspection and transfer it over an encrypted channel. Do not attach the JSONL file to an issue, commit it, or place it in an agent-readable folder. Transfer only this filtered output, not the original database or linked-device session credentials.
 
 ## Import at the destination
 
@@ -35,10 +35,16 @@ sudo systemctl start whatsapp-archive.service
 
 Before that command, install the transfer file into the private state directory with the service account as its owner and mode `0600`. The shared data-directory lock prevents an import from running alongside the daemon. Do not bypass the lock or run the importer as root; new state files should remain owned by the service account.
 
-The import count describes valid accepted input records, not the final number of rows retained. Duplicate message keys can replace existing rows, and retention days or per-chat caps can discard older records. Compare the archive's status and bounded read results with the intended scope after import. An empty retained archive can be valid when all accepted records are older than the retention window.
+The import count describes valid accepted input records, not the final number of rows retained. `attachment_refs` counts complete descriptors exported or accepted for import; it does not count downloaded files or prove that the remote attachment remains available. Export reports incomplete, unsupported, or unsafe legacy media references in `attachment_refs_skipped` while preserving valid message text. A malformed approved descriptor in an input transfer is rejected with a content-free error. Duplicate message keys can replace existing rows, and retention days or per-chat caps can discard older records and their descriptors. Compare the archive's status and bounded read results with the intended scope after import. An empty retained archive can be valid when all accepted records are older than the retention window.
 
 The output and transferred copy are outside live archive cleanup. Remove them after verification according to the administrator's retention policy. If an import stops with an error, earlier committed batches can remain. Correct the source and repeat through the same policy-enforcing command rather than writing directly to SQLite.
 
+Each valid imported record replaces that message's attachment state. A record without a complete private descriptor removes any previously associated attachment and cached bytes, including when the media type is unchanged. If a transfer repeats the same chat/message key, its last valid record wins. Keep the original selected export available until import verification is complete.
+
 ## Coverage limits
 
-Only rows present in the source archive can migrate. Legacy media binaries, download URLs, encryption keys, contact directories, quoted-message metadata, and linked-device credentials are not transferred. Text copied or forwarded into an approved chat remains part of that chat's content; chat approval does not establish the original sender's identity or approval.
+Only rows present in the source archive can migrate. Media descriptors are selected by the same exact chat allowlist as message text and must pass the hard 128 MiB attachment limit. Complete descriptors above the current `max_attachment_bytes` setting are retained as `oversized`; they become eligible for download if that setting is raised within the hard limit. The exporter supports the original media columns and optional direct-path/MIME columns when present. It converts only validated HTTPS WhatsApp/Meta CDN URLs to rooted media paths; it never transfers an arbitrary fetch URL. Local file paths and upstream downloaded binaries are not copied or trusted.
+
+Imported image, document, audio, and video records can be fetched through the destination's normal authenticated attachment tools after the service starts. The phone or remote service may no longer make older attachments available. Successful descriptor migration therefore preserves the ability to try fetching media, rather than promising that every historical file can be recovered. No network request occurs during export or import, and the existing private cache is populated only through the normal download checks.
+
+Contact directories, quoted-message metadata, and linked-device session credentials are not transferred. Text copied or forwarded into an approved chat remains part of that chat's content; chat approval does not establish the original sender's identity or approval.

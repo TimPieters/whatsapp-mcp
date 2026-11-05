@@ -65,6 +65,7 @@ func New(store *archive.Store, source StatusSource, token, version string) http.
 	transport := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", transport)
+	registerAttachments(server, mux, store, source, annotation)
 	slots := make(chan struct{}, 4)
 	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")

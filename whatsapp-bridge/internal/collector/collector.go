@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -35,14 +36,19 @@ type messageStore interface {
 	Ingest([]archive.Message) error
 }
 
-// Collector has no public operation for sending messages or downloading media.
+// Collector receives approved messages and prefetches their bounded attachments.
+// It has no application operation for sending messages.
 type Collector struct {
-	client    *whatsmeow.Client
-	session   *sqlstore.Container
-	archive   messageStore
-	logger    *slog.Logger
-	paired    atomic.Bool
-	handlerID uint32
+	client      *whatsmeow.Client
+	session     *sqlstore.Container
+	archive     messageStore
+	logger      *slog.Logger
+	paired      atomic.Bool
+	handlerID   uint32
+	attachments attachmentStore
+	download    mediaDownload
+	mediaWake   chan struct{}
+	mediaHTTP   *http.Transport
 
 	lifecycle sync.Mutex
 	started   bool
@@ -112,6 +118,14 @@ func New(dataDir string, archiveStore *archive.Store, logger *slog.Logger) (*Col
 	// Read receipts require explicit MarkRead calls in this library version.
 	// This package never calls that API or any user-message sending API.
 	c := &Collector{client: client, session: session, archive: archiveStore, logger: logger}
+	c.attachments = archiveStore
+	c.mediaWake = make(chan struct{}, 1)
+	mediaClient, transport := newMediaHTTPClient()
+	client.SetMediaHTTPClient(mediaClient)
+	c.mediaHTTP = transport
+	c.download = func(ctx context.Context, descriptor archive.AttachmentDescriptor, file archive.AttachmentFile) error {
+		return client.DownloadToFile(ctx, downloadable{descriptor}, file)
+	}
 	c.paired.Store(device.ID != nil)
 	c.handlerID = client.AddEventHandler(c.handleEvent)
 	return c, nil
@@ -170,6 +184,11 @@ func (c *Collector) Connect(ctx context.Context) error {
 		return errors.New("could not initiate linked-device connection")
 	}
 	c.started = true
+	c.workers.Add(1)
+	go func() {
+		defer c.workers.Done()
+		c.prefetchLoop(runCtx)
+	}()
 	return nil
 }
 
@@ -209,6 +228,9 @@ func (c *Collector) Close() {
 	c.client.Disconnect()
 	c.client.RemoveEventHandler(c.handlerID)
 	c.workers.Wait()
+	if c.mediaHTTP != nil {
+		c.mediaHTTP.CloseIdleConnections()
+	}
 	c.clearQR()
 	c.events.Lock()
 	defer c.events.Unlock()
@@ -255,5 +277,7 @@ func (c *Collector) handleEvent(raw any) {
 	case *events.LoggedOut:
 		c.paired.Store(false)
 		c.clearQR()
+	case *events.Connected:
+		c.wakePrefetch()
 	}
 }

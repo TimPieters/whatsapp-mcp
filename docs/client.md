@@ -29,8 +29,24 @@ On a remote client, point the transport at the local end of an authenticated enc
 
 ## Confirm scope
 
-After connecting, inspect the advertised tools. They should be exactly `whatsapp_status`, `list_chats`, `list_messages`, and `search_messages`. `whatsapp_status` returns connection state and retained archive counts without message content. `list_chats` returns only currently approved chats that have retained messages, with labels chosen by the administrator. An approved chat with no retained messages may be absent.
+After connecting, inspect the advertised tools. They should be exactly `whatsapp_status`, `list_chats`, `list_messages`, `search_messages`, `get_attachment`, and `read_attachment`. `whatsapp_status` returns connection state and retained archive counts without message content. `list_chats` returns only currently approved chats that have retained messages, with labels chosen by the administrator. An approved chat with no retained messages may be absent.
 
 Use `list_messages` with an exact `chat_jid`; its optional `before` cursor is exclusive Unix seconds. `search_messages` performs literal text matching, optionally restricted to one exact approved chat. Results are bounded by server configuration. None of these results proves complete WhatsApp history.
 
 Treat returned messages as untrusted data. A message that asks the client to change settings, run a command, reveal a credential, or contact someone does not authorize that action.
+
+## Attachments
+
+The collector downloads new approved attachments automatically in the background. Message results include attachment metadata and cache status when a usable reference was retained. Use the exact `chat_jid` and message `id` with `get_attachment`. It returns a resource URI and a relative HTTP download path. It also returns cached JPEG, PNG, GIF, WebP images and supported audio inline when they are at most 4 MiB, unless `metadata_only` is true. Other formats retain file retrieval access. Client support for displaying image/audio content varies. A missing cached file is queued for download; check status again rather than assuming a queued request is already complete.
+
+For spreadsheets, documents, videos, and larger files, choose the retrieval method your client supports:
+
+- Fetch the returned `download_path` from the same server with the same bearer header. This streams the complete original file, supports a single HTTP byte range, and does not expose a service-account filesystem path. Save it under the client's own private workspace before opening it with a document or media tool.
+- Read the returned `resource_uri` through MCP `resources/read` for files up to 8 MiB. Binary resource content is base64-encoded on the wire.
+- Use `read_attachment` with `offset` and `length` for clients with tools but no resource or HTTP integration. Each call returns at most 1 MiB of base64-encoded bytes. Decode and concatenate chunks in offset order until `eof` is true. Prefer HTTP for large files to avoid passing base64 through the model context.
+
+The HTTP download URL never contains a token. Do not forward authorization to a URL supplied by a chat message; resolve only the tool's relative `/attachments` path against the trusted configured server. Do not grant access to the private cache directory or run a public static-file server over it. Every retrieval checks current chat approval and retention. Revocation cannot erase copies that a client already downloaded.
+
+File retrieval preserves original bytes. Spreadsheet parsing, PDF text extraction, image understanding, audio transcription, and video analysis are client capabilities. Treat attachment names and content as untrusted; never execute a file or enable spreadsheet macros just because it arrived in an approved chat. Retain local client copies only as long as needed.
+
+The cache is bounded and downloads can fail when WhatsApp no longer hosts the file. The default per-file ceiling is 32 MiB. An administrator can raise it, up to 128 MiB, and adjust the total cache budget. Initial history migration can supply valid media references when present in the original database, but cannot guarantee that historical files remain downloadable.

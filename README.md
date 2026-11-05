@@ -1,8 +1,8 @@
 # WhatsApp archive MCP
 
-A read-only MCP server for a local archive of explicitly approved WhatsApp chats. One Go process maintains a linked-device connection, filters incoming chat envelopes, stores approved text in SQLite, and serves authenticated HTTP tools.
+A read-only MCP server for a local archive of explicitly approved WhatsApp chats. One Go process maintains a linked-device connection, filters incoming chat envelopes, stores approved text in SQLite, caches approved attachments on disk, and serves authenticated HTTP tools.
 
-The allowlist starts empty. The server provides four tools:
+The allowlist starts empty. The server provides six tools:
 
 | Tool | Purpose |
 | --- | --- |
@@ -10,8 +10,12 @@ The allowlist starts empty. The server provides four tools:
 | `list_chats` | List approved chats with configured labels |
 | `list_messages` | Read retained messages from an approved chat |
 | `search_messages` | Search retained text in approved chats |
+| `get_attachment` | Get attachment status, retrieval links, and small inline images/audio |
+| `read_attachment` | Read cached file bytes in bounded chunks |
 
-There are no MCP tools for sending, reacting, downloading media, managing contacts, pairing, changing the allowlist, or importing history. The archive keeps text and media captions, plus a media type marker. View-once messages and unsupported structured payloads are skipped.
+There are no MCP tools for sending, reacting, managing contacts, pairing, changing the allowlist, or importing history. The archive keeps text, captions, and approved attachment metadata. A single background worker downloads images, videos, audio, stickers, and documents, including spreadsheets, into a bounded private disk cache. View-once messages and unsupported structured payloads are skipped.
+
+Cached JPEG, PNG, GIF, WebP images and supported audio up to 4 MiB can be returned inline through MCP. Original files are available through authenticated HTTP, MCP binary resources up to 8 MiB, or bounded byte chunks. File access does not itself transcribe speech, parse spreadsheets, or analyze video; the client supplies those capabilities. See [attachment access](docs/client.md#attachments).
 
 ## Build
 
@@ -85,6 +89,8 @@ The daemon accepts only literal loopback listen addresses. For access from anoth
 ## Configuration and retention
 
 [deploy/config.example.json](deploy/config.example.json) lists the supported configuration fields. Defaults retain 90 days and at most 10,000 messages per chat, with at most 100 results per query. Adjust them for the intended archive size.
+
+Attachments download automatically after collection, subject to `max_attachment_bytes` (default 32 MiB per file) and `attachment_cache_bytes` (default 1 GiB of cached file content). These are disk limits, not RAM allocations. Oversized files remain identifiable but are not downloaded. Least-recently-used cached files can be evicted; `get_attachment` can queue a fresh download if the source remains available. Cache eviction is distinct from message deletion. Removing or expiring a message removes its attachment reference and cached file. Downloads use streaming I/O and one worker, with temporary space needed for the in-flight file.
 
 While serving, the daemon checks configuration every five seconds. A validated allowlist change applies to ingestion and reads. Removing approval also purges that chat's archived rows. Invalid configuration suspends archive access. Changing the listen address, data directory, or token-file path requires a restart; a live change to those values suspends access until then.
 

@@ -85,6 +85,10 @@ These are configurable ceilings, not measured consumption or proof of spare syst
 
 Account-wide initial history download is disabled, and approved archive writes are bounded. This reduces one source of large history bursts without proving a maximum working set. Observe process and cgroup memory on the actual host under representative traffic, then adjust a unit override and restart if needed. Check that the host supports the configured cgroup controls.
 
+Approved attachments are prefetched by one background worker. The default `max_attachment_bytes` is 33,554,432 bytes and `attachment_cache_bytes` is 1,073,741,824 bytes. Both settings live in the administrator-owned JSON configuration and reload with the other archive policy. The maximum supported individual file is 128 MiB. Allow space for the archive/session databases and filesystem overhead in addition to the attachment cache. Disk capacity is not a RAM reservation; downloads and complete HTTP reads stream from files.
+
+Cached attachments follow parent-message approval, retention, and count limits. Cache pressure evicts least-recently-used files while keeping eligible message metadata. A later `get_attachment` can request another download. Source files can expire, so cache eviction can make a historical attachment unavailable permanently. Use a deliberately sized cache and protected backups if long-term file retention is needed. The cache is not a permanent document-management system.
+
 CI also records a synthetic archive-import resource check on native Linux AMD64. It compiles an archive test binary without race instrumentation, imports 20,000 synthetic 1 KiB messages across two chats in batches of 100, and runs the benchmark once under `/usr/bin/time -v`:
 
 ```sh
@@ -95,6 +99,8 @@ CGO_ENABLED=0 go test -c -o /tmp/archive.test ./internal/archive
 ```
 
 The resulting maximum resident set size and elapsed time appear in CI logs. This measures the synthetic archive operation on that runner, including the Go test process. It excludes the live linked-device connection, transport bursts, and target-host behavior, so it cannot establish deployment headroom. No result is claimed before the workflow runs.
+
+CI separately measures `BenchmarkStreamingAttachment` using a generated 32 MiB file streamed through the private cache and read back. This checks the file-storage path without allocating a file-sized input buffer. It excludes a real WhatsApp download, TLS, decryption, and any client-side file analysis, and does not establish a live-process peak.
 
 ## Backups and upgrades
 

@@ -244,7 +244,7 @@ func changeAllowed(path, jid, label string, add bool) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	fmt.Println("Updated allowlist. A running service reloads within five seconds.")
+	fmt.Println("Updated allowlist. A running service checks for changes every five seconds; an active read may finish first.")
 	return nil
 }
 

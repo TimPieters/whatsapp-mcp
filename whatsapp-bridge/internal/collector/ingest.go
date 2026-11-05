@@ -35,7 +35,7 @@ func (c *Collector) handleMessage(event *events.Message) {
 		Sender: event.Info.Sender.ToNonAD().String(), Timestamp: event.Info.Timestamp.Unix(),
 		Text: text, MediaType: media, FromMe: event.Info.IsFromMe,
 	}
-	if err := c.archive.Ingest([]archive.Message{row}); err != nil {
+	if err := c.ingest([]archive.Message{row}, attachmentRecord(row, message)); err != nil {
 		c.logger.Warn("approved message could not be archived")
 	}
 }
@@ -45,13 +45,16 @@ func (c *Collector) handleHistory(event *events.HistorySync) {
 		return
 	}
 	batch := make([]archive.Message, 0, historyBatchSize)
+	refs := make([]archive.AttachmentRecord, 0, historyBatchSize)
 	flush := func() {
 		if len(batch) > 0 {
-			if err := c.archive.Ingest(batch); err != nil {
+			if err := c.ingest(batch, refs); err != nil {
 				c.logger.Warn("approved history batch could not be archived")
 			}
 			clear(batch)
 			batch = batch[:0]
+			clear(refs)
+			refs = refs[:0]
 		}
 	}
 	for _, conversation := range event.Data.GetConversations() {
@@ -97,11 +100,13 @@ func (c *Collector) handleHistory(event *events.HistorySync) {
 				// No account identifier is needed for the owner; FromMe is explicit.
 				sender = ""
 			}
-			batch = append(batch, archive.Message{
+			row := archive.Message{
 				ID: key.GetID(), ChatJID: chat, Sender: sender,
 				Timestamp: int64(web.GetMessageTimestamp()), FromMe: key.GetFromMe(),
 				Text: text, MediaType: media,
-			})
+			}
+			batch = append(batch, row)
+			refs = append(refs, attachmentRecord(row, web.GetMessage())...)
 			if len(batch) == historyBatchSize {
 				flush()
 			}
@@ -113,9 +118,34 @@ func (c *Collector) handleHistory(event *events.HistorySync) {
 // extract ignores view-once payloads, unsupported structured data, and metadata.
 // Wrappers are bounded to avoid traversing malformed, cyclic synthetic objects.
 func extract(message *waE2E.Message) (text, media string, ok bool) {
+	message = contentMessage(message)
+	if message == nil {
+		return "", "", false
+	}
+	switch {
+	case message.Conversation != nil:
+		return message.GetConversation(), "", message.GetConversation() != ""
+	case message.ExtendedTextMessage != nil:
+		return message.GetExtendedTextMessage().GetText(), "", message.GetExtendedTextMessage().GetText() != ""
+	case message.ImageMessage != nil:
+		return message.GetImageMessage().GetCaption(), "image", true
+	case message.VideoMessage != nil:
+		return message.GetVideoMessage().GetCaption(), "video", true
+	case message.DocumentMessage != nil:
+		return message.GetDocumentMessage().GetCaption(), "document", true
+	case message.AudioMessage != nil:
+		return "", "audio", true
+	case message.StickerMessage != nil:
+		return "", "sticker", true
+	default:
+		return "", "", false
+	}
+}
+
+func contentMessage(message *waE2E.Message) *waE2E.Message {
 	for depth := 0; message != nil && depth < 8; depth++ {
 		if message.ViewOnceMessage != nil || message.ViewOnceMessageV2 != nil || message.ViewOnceMessageV2Extension != nil {
-			return "", "", false
+			return nil
 		}
 		switch {
 		case message.DeviceSentMessage != nil:
@@ -127,25 +157,8 @@ func extract(message *waE2E.Message) (text, media string, ok bool) {
 		case message.EditedMessage != nil:
 			message = message.GetEditedMessage().GetMessage()
 		default:
-			switch {
-			case message.Conversation != nil:
-				return message.GetConversation(), "", message.GetConversation() != ""
-			case message.ExtendedTextMessage != nil:
-				return message.GetExtendedTextMessage().GetText(), "", message.GetExtendedTextMessage().GetText() != ""
-			case message.ImageMessage != nil:
-				return message.GetImageMessage().GetCaption(), "image", true
-			case message.VideoMessage != nil:
-				return message.GetVideoMessage().GetCaption(), "video", true
-			case message.DocumentMessage != nil:
-				return message.GetDocumentMessage().GetCaption(), "document", true
-			case message.AudioMessage != nil:
-				return "", "audio", true
-			case message.StickerMessage != nil:
-				return "", "sticker", true
-			default:
-				return "", "", false
-			}
+			return message
 		}
 	}
-	return "", "", false
+	return nil
 }
