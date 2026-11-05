@@ -116,6 +116,8 @@ Initial account-wide history downloads are disabled. The collector archives new 
 
 Run export on the trusted source machine. Transfer only the allowlisted JSONL file. Stop the destination service before importing. See [migration](docs/migration.md) for snapshot handling, retention, and verification.
 
+For failed downloads whose files may still exist on the linked owner's phone, the administrator-only `recover-attachments` command queues a bounded media-recovery request. It never posts chat messages and is not exposed over MCP. See [operations](docs/operations.md) for scope and availability limits.
+
 ## Privacy limits and deployment
 
 The archive allowlist controls which chat envelopes may persist message text. It cannot stop the linked-device library from receiving and decrypting other account traffic in memory. The separate `session.db` retains necessary cryptographic sessions, app-state synchronization metadata, and phone-number/linked-identity mappings, including identifiers outside the allowlist. Contact-name and plaintext-event persistence are disabled.

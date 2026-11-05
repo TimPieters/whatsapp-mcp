@@ -5,7 +5,60 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"whatsapp-client/internal/collector"
 )
+
+func TestRecoveryCommandIsPrivateAndDoesNotOverwriteRequests(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"data_dir":".","allowed_chats":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"recover-attachments", "--config", path}); err == nil {
+		t.Fatal("empty allowlist queued recovery")
+	}
+	if err := changeAllowed(path, "15551234567@s.whatsapp.net", "Example", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"recover-attachments", "--config", path}); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, collector.MediaRecoveryRequestName)
+	data, err := os.ReadFile(marker)
+	if err != nil || string(data) != collector.MediaRecoveryRequestContent {
+		t.Fatal("invalid recovery request")
+	}
+	if err := run([]string{"recover-attachments", "--config", path}); err == nil {
+		t.Fatal("duplicate recovery request accepted")
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "media-recovery.processing"), []byte("active"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"recover-attachments", "--config", path}); err == nil {
+		t.Fatal("processing request bypassed")
+	}
+}
+
+func TestRecoveryStartupCleanupPreservesPendingRequest(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{collector.MediaRecoveryRequestName, "media-recovery.processing"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(collector.MediaRecoveryRequestContent), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := removeStaleRecoveryProcessing(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "media-recovery.processing")); !os.IsNotExist(err) {
+		t.Fatal("stale processing marker remains")
+	}
+	if _, err := os.Stat(filepath.Join(dir, collector.MediaRecoveryRequestName)); err != nil {
+		t.Fatal("pending request removed")
+	}
+}
 
 func TestTokenFileRejectsEmptyShortOversizedAndWhitespace(t *testing.T) {
 	for _, input := range []string{"", "short", strings.Repeat("a", 1025), strings.Repeat("a", 32) + " " + strings.Repeat("b", 32), strings.Repeat("a", 32) + "\n" + strings.Repeat("b", 32)} {

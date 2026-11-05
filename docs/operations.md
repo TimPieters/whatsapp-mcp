@@ -102,6 +102,32 @@ The resulting maximum resident set size and elapsed time appear in CI logs. This
 
 CI separately measures `BenchmarkStreamingAttachment` using a generated 32 MiB file streamed through the private cache and read back. This checks the file-storage path without allocating a file-sized input buffer. It excludes a real WhatsApp download, TLS, decryption, and any client-side file analysis, and does not establish a live-process peak.
 
+## Recover failed attachments
+
+An administrator can ask the connected owner's phone to refresh failed attachment download paths:
+
+```sh
+sudo -u whatsapp-archive /usr/local/bin/whatsapp-bridge recover-attachments \
+  --config /etc/whatsapp-archive/config.json
+```
+
+Run this as the service account while the paired daemon is connected. The command creates a private request marker; the daemon processes at most 32 eligible failed attachments and records one recovery attempt per file. Requests are paced and sent only to the account owner's linked phone through the media-retry protocol. They do not post chat messages or mark messages read. The phone must still have the file and be able to respond. Unknown legacy group participants are omitted rather than fabricated, and the phone may reject an incomplete old envelope.
+
+Only currently approved, retained messages are eligible. Responses must match the pending message and private reference, and cannot revive removed chats. A refreshed path is downloaded through the same size, cache, and integrity checks as other attachments. Recovery is not an MCP tool and cannot be triggered by the bearer credential alone. It is not a promise that deleted or unavailable phone media can be reconstructed. Leave the private attempt records intact to avoid repeated reupload requests.
+
+If an administrator already has an original file, restore that one attachment while the service is stopped:
+
+```sh
+sudo systemctl stop whatsapp-archive.service
+sudo -u whatsapp-archive /usr/local/bin/whatsapp-bridge restore-attachment \
+  --config /etc/whatsapp-archive/config.json \
+  --jid '120363000000000000@g.us' --message-id 'EXAMPLE_MESSAGE_ID' \
+  --source /var/lib/whatsapp-archive/private-original.bin
+sudo systemctl start whatsapp-archive.service
+```
+
+The source must be readable by the service account and match the selected message's existing size and SHA-256 exactly. A similar filename or a newer document revision is insufficient. This command does not change the message, expected hash, encryption credentials or allowlist. It uses the same bounded cache path and is not available over MCP. Remove temporary transfer copies after verification; preserve the original source separately.
+
 ## Backups and upgrades
 
 Stop the service before copying SQLite files, or use a proper SQLite backup tool that includes committed WAL data. Back up the token and linked-device session only to storage with equivalent private access controls. Treat a backup of protocol keys as account credentials. Archive policy changes cannot purge older backups.

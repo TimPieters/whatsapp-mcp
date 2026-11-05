@@ -151,6 +151,8 @@ func (c *Collector) prefetchLoop(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
+		c.expireMediaRecoveries()
+		c.processMediaRecoveryRequest(ctx)
 		c.prefetchAvailable(ctx)
 		select {
 		case <-ctx.Done():

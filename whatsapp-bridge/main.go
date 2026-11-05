@@ -43,7 +43,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: whatsapp-mcp <init|serve|allow|deny|qr|export-upstream|import|version> [options]")
+		return errors.New("usage: whatsapp-mcp <init|serve|allow|deny|qr|recover-attachments|restore-attachment|export-upstream|import|version> [options]")
 	}
 	if args[0] == "version" {
 		fmt.Println(version)
@@ -54,6 +54,7 @@ func run(args []string) error {
 	dataDir := fs.String("data-dir", "data", "private state directory, for init")
 	tokenPath := fs.String("token-file", "token", "bearer-token file, for init")
 	jid := fs.String("jid", "", "exact chat identifier, for allow or deny")
+	messageID := fs.String("message-id", "", "exact message identifier, for restore-attachment")
 	label := fs.String("label", "", "local label, for allow")
 	source := fs.String("source", "", "migration source file")
 	output := fs.String("output", "", "migration or QR output file")
@@ -70,6 +71,56 @@ func run(args []string) error {
 		return changeAllowed(*configPath, *jid, *label, args[0] == "allow")
 	case "serve":
 		return serve(*configPath)
+	case "restore-attachment":
+		cfg, err := loadConfig(*configPath)
+		if err != nil {
+			return err
+		}
+		if *source == "" || *jid == "" || *messageID == "" {
+			return errors.New("--source, --jid and --message-id are required")
+		}
+		in, err := os.Open(*source)
+		if err != nil {
+			return errors.New("cannot open local attachment source")
+		}
+		defer in.Close()
+		info, err := in.Stat()
+		if err != nil || !info.Mode().IsRegular() || info.Size() > cfg.MaxAttachmentBytes {
+			return errors.New("local source is not a bounded regular file")
+		}
+		lock, err := lockState(cfg.DataDir)
+		if err != nil {
+			return err
+		}
+		defer lock.Unlock()
+		store, err := archive.Open(filepath.Join(cfg.DataDir, "archive.db"), cfg)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		if err := store.RestoreAttachment(context.Background(), *jid, *messageID, in); err != nil {
+			return errors.New("local attachment restore failed approval, availability, size or integrity checks")
+		}
+		fmt.Println("Attachment verified and available in the approved cache.")
+		return nil
+	case "recover-attachments":
+		cfg, err := loadConfig(*configPath)
+		if err != nil {
+			return err
+		}
+		if len(cfg.AllowedChats) == 0 {
+			return errors.New("approve chats before requesting attachment recovery")
+		}
+		if _, err := os.Lstat(filepath.Join(cfg.DataDir, "media-recovery.processing")); err == nil {
+			return errors.New("an attachment recovery request is already processing")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return errors.New("cannot inspect the private recovery state")
+		}
+		if err := writeNew(filepath.Join(cfg.DataDir, collector.MediaRecoveryRequestName), []byte(collector.MediaRecoveryRequestContent)); err != nil {
+			return errors.New("cannot queue recovery; run as the state owner and check for an existing request")
+		}
+		fmt.Println("Queued bounded owner-phone media recovery for eligible failed attachments. The connected service will process it; files absent from the phone may remain unavailable.")
+		return nil
 	case "qr":
 		cfg, err := loadConfig(*configPath)
 		if err != nil {
@@ -299,6 +350,9 @@ func serve(path string) error {
 	if err = removePairingFiles(cfg.DataDir); err != nil {
 		return err
 	}
+	if err = removeStaleRecoveryProcessing(cfg.DataDir); err != nil {
+		return err
+	}
 	store, err := archive.Open(filepath.Join(cfg.DataDir, "archive.db"), cfg)
 	if err != nil {
 		return err
@@ -427,6 +481,15 @@ func removePairingFiles(dir string) error {
 		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
 			return errors.New("could not remove stale pairing material")
 		}
+	}
+	return nil
+}
+
+// Call only after the exclusive daemon state lock is held. The archive's durable
+// per-file attempt flags remain intact; a crash must not cause repeated receipts.
+func removeStaleRecoveryProcessing(dir string) error {
+	if err := os.Remove(filepath.Join(dir, "media-recovery.processing")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errors.New("could not clear stale private recovery processing marker")
 	}
 	return nil
 }

@@ -147,7 +147,10 @@ func (s *Store) initAttachments() error {
 		length INTEGER NOT NULL,status TEXT NOT NULL,cache_name TEXT NOT NULL DEFAULT '',
 		last_access INTEGER NOT NULL DEFAULT 0,retry_after INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY(chat_jid,message_id),FOREIGN KEY(chat_jid,message_id) REFERENCES messages(chat_jid,id) ON DELETE CASCADE)`)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.initAttachmentRecovery()
 }
 
 func (s *Store) invalidateAttachmentsLocked() {
@@ -214,6 +217,13 @@ func (s *Store) registerAttachmentLocked(q sqlRunner, jid, id string, d Attachme
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+	preservePhoneAttempt := false
+	if len(previous) > 0 {
+		var old AttachmentDescriptor
+		if json.Unmarshal(previous, &old) == nil {
+			preservePhoneAttempt = old.FileLength == d.FileLength && old.MediaType == d.MediaType && equalBytes(old.MediaKey, d.MediaKey) && equalBytes(old.FileSHA256, d.FileSHA256) && equalBytes(old.FileEncSHA256, d.FileEncSHA256)
+		}
+	}
 	ref, err := randomRef()
 	if err != nil {
 		return err
@@ -223,7 +233,7 @@ func (s *Store) registerAttachmentLocked(q sqlRunner, jid, id string, d Attachme
 		status = "oversized"
 	}
 	_, err = q.Exec(`INSERT INTO attachments(chat_jid,message_id,ref,descriptor,kind,mime,filename,length,status) VALUES(?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(chat_jid,message_id) DO UPDATE SET ref=excluded.ref,descriptor=excluded.descriptor,kind=excluded.kind,mime=excluded.mime,filename=excluded.filename,length=excluded.length,status=excluded.status,cache_name='',last_access=0,retry_after=0,attempts=0`, jid, id, ref, data, d.MediaType, d.MIMEType, d.Filename, d.FileLength, status)
+		ON CONFLICT(chat_jid,message_id) DO UPDATE SET ref=excluded.ref,descriptor=excluded.descriptor,kind=excluded.kind,mime=excluded.mime,filename=excluded.filename,length=excluded.length,status=excluded.status,cache_name='',last_access=0,retry_after=0,attempts=0,phone_retry_attempted=CASE WHEN ? THEN phone_retry_attempted ELSE 0 END`, jid, id, ref, data, d.MediaType, d.MIMEType, d.Filename, d.FileLength, status, preservePhoneAttempt)
 	return err
 }
 

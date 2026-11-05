@@ -19,6 +19,7 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	_ "modernc.org/sqlite"
@@ -39,16 +40,21 @@ type messageStore interface {
 // Collector receives approved messages and prefetches their bounded attachments.
 // It has no application operation for sending messages.
 type Collector struct {
-	client      *whatsmeow.Client
-	session     *sqlstore.Container
-	archive     messageStore
-	logger      *slog.Logger
-	paired      atomic.Bool
-	handlerID   uint32
-	attachments attachmentStore
-	download    mediaDownload
-	mediaWake   chan struct{}
-	mediaHTTP   *http.Transport
+	client         *whatsmeow.Client
+	session        *sqlstore.Container
+	archive        messageStore
+	logger         *slog.Logger
+	paired         atomic.Bool
+	handlerID      uint32
+	attachments    attachmentStore
+	download       mediaDownload
+	mediaWake      chan struct{}
+	mediaHTTP      *http.Transport
+	dataDir        string
+	recoveryMu     sync.Mutex
+	recoveries     map[string]pendingRecovery
+	recoveryStats  map[string]int
+	sendMediaRetry func(context.Context, *types.MessageInfo, []byte) error
 
 	lifecycle sync.Mutex
 	started   bool
@@ -117,7 +123,7 @@ func New(dataDir string, archiveStore *archive.Store, logger *slog.Logger) (*Col
 	client.ManualHistorySyncDownload = true
 	// Read receipts require explicit MarkRead calls in this library version.
 	// This package never calls that API or any user-message sending API.
-	c := &Collector{client: client, session: session, archive: archiveStore, logger: logger}
+	c := &Collector{client: client, session: session, archive: archiveStore, logger: logger, dataDir: dataDir}
 	c.attachments = archiveStore
 	c.mediaWake = make(chan struct{}, 1)
 	mediaClient, transport := newMediaHTTPClient()
@@ -126,6 +132,7 @@ func New(dataDir string, archiveStore *archive.Store, logger *slog.Logger) (*Col
 	c.download = func(ctx context.Context, descriptor archive.AttachmentDescriptor, file archive.AttachmentFile) error {
 		return client.DownloadToFile(ctx, downloadable{descriptor}, file)
 	}
+	c.sendMediaRetry = client.SendMediaRetryReceipt
 	c.paired.Store(device.ID != nil)
 	c.handlerID = client.AddEventHandler(c.handleEvent)
 	return c, nil
@@ -279,5 +286,7 @@ func (c *Collector) handleEvent(raw any) {
 		c.clearQR()
 	case *events.Connected:
 		c.wakePrefetch()
+	case *events.MediaRetry:
+		c.handleMediaRetry(event)
 	}
 }
