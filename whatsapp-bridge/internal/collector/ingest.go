@@ -14,6 +14,10 @@ func (c *Collector) handleMessage(event *events.Message) {
 	if event == nil {
 		return
 	}
+	if event.UnavailableRequestID != "" {
+		c.handleAttachmentMessageCopy(event)
+		return
+	}
 	chat := event.Info.Chat.ToNonAD().String()
 	// Admission precedes content extraction and all archive operations.
 	if !c.archive.IsAllowed(chat) {

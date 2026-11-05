@@ -3,11 +3,14 @@ package collector
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
 	"strings"
 	"time"
+
+	"whatsapp-client/internal/archive"
 )
 
 func trustedMediaHost(host string) bool {
@@ -21,10 +24,22 @@ func trustedMediaHost(host string) bool {
 }
 
 type mediaGuard struct{ transport http.RoundTripper }
+type mediaFileContextKey struct{}
 
 func (g mediaGuard) RoundTrip(request *http.Request) (*http.Response, error) {
 	if request.Method != http.MethodGet || request.URL.Scheme != "https" || request.URL.User != nil || !trustedMediaHost(request.URL.Hostname()) || (request.URL.Port() != "" && request.URL.Port() != "443") {
 		return nil, errors.New("untrusted media endpoint")
+	}
+	// The pinned downloader can move to another media host after an integrity
+	// failure without resetting its file. Every full GET must start empty so a
+	// retry cannot append a second ciphertext and hide the first integrity error.
+	if file, ok := request.Context().Value(mediaFileContextKey{}).(archive.AttachmentFile); ok {
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		if err := file.Truncate(0); err != nil {
+			return nil, err
+		}
 	}
 	return g.transport.RoundTrip(request)
 }

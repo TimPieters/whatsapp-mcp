@@ -218,10 +218,12 @@ func (s *Store) registerAttachmentLocked(q sqlRunner, jid, id string, d Attachme
 		return err
 	}
 	preservePhoneAttempt := false
+	preserveMessageCopy := false
 	if len(previous) > 0 {
 		var old AttachmentDescriptor
 		if json.Unmarshal(previous, &old) == nil {
 			preservePhoneAttempt = old.FileLength == d.FileLength && old.MediaType == d.MediaType && equalBytes(old.MediaKey, d.MediaKey) && equalBytes(old.FileSHA256, d.FileSHA256) && equalBytes(old.FileEncSHA256, d.FileEncSHA256)
+			preserveMessageCopy = old.FileLength == d.FileLength && old.MediaType == d.MediaType && equalBytes(old.FileSHA256, d.FileSHA256)
 		}
 	}
 	ref, err := randomRef()
@@ -233,7 +235,13 @@ func (s *Store) registerAttachmentLocked(q sqlRunner, jid, id string, d Attachme
 		status = "oversized"
 	}
 	_, err = q.Exec(`INSERT INTO attachments(chat_jid,message_id,ref,descriptor,kind,mime,filename,length,status) VALUES(?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(chat_jid,message_id) DO UPDATE SET ref=excluded.ref,descriptor=excluded.descriptor,kind=excluded.kind,mime=excluded.mime,filename=excluded.filename,length=excluded.length,status=excluded.status,cache_name='',last_access=0,retry_after=0,attempts=0,phone_retry_attempted=CASE WHEN ? THEN phone_retry_attempted ELSE 0 END`, jid, id, ref, data, d.MediaType, d.MIMEType, d.Filename, d.FileLength, status, preservePhoneAttempt)
+		ON CONFLICT(chat_jid,message_id) DO UPDATE SET ref=excluded.ref,descriptor=excluded.descriptor,kind=excluded.kind,mime=excluded.mime,filename=excluded.filename,length=excluded.length,status=excluded.status,cache_name='',last_access=0,retry_after=0,attempts=0,
+		phone_retry_attempted=CASE WHEN ? THEN phone_retry_attempted ELSE 0 END,
+		message_copy_attempted=CASE WHEN ? THEN message_copy_attempted ELSE 0 END,
+		message_copy_send_started=CASE WHEN ? THEN message_copy_send_started ELSE 0 END,
+		message_copy_request_id=CASE WHEN ? THEN message_copy_request_id ELSE '' END,
+		message_copy_request_ref=CASE WHEN ? THEN message_copy_request_ref ELSE '' END,
+		message_copy_generation=CASE WHEN ? THEN message_copy_generation ELSE 0 END`, jid, id, ref, data, d.MediaType, d.MIMEType, d.Filename, d.FileLength, status, preservePhoneAttempt, preserveMessageCopy, preserveMessageCopy, preserveMessageCopy, preserveMessageCopy, preserveMessageCopy)
 	return err
 }
 

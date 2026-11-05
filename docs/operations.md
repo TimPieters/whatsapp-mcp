@@ -115,6 +115,15 @@ Run this as the service account while the paired daemon is connected. The comman
 
 Only currently approved, retained messages are eligible. Responses must match the pending message and private reference, and cannot revive removed chats. A refreshed path is downloaded through the same size, cache, and integrity checks as other attachments. Recovery is not an MCP tool and cannot be triggered by the bearer credential alone. It is not a promise that deleted or unavailable phone media can be reconstructed. Leave the private attempt records intact to avoid repeated reupload requests.
 
+If refreshed paths remain unusable, an administrator can request copies of the exact failed messages from the owner's phone:
+
+```sh
+sudo -u whatsapp-archive /usr/local/bin/whatsapp-bridge recover-message-copies \
+  --config /etc/whatsapp-archive/config.json
+```
+
+This uses a separate once-per-file attempt record and the same bounded, private request mechanism. It requests individual messages from the owner's primary device without posting messages to chats or downloading account-wide history. Each response must match the saved peer request and approved message. It can update encryption credentials and a download path only when the attachment type, original plaintext SHA-256 and size remain identical. Missing or incomplete historical metadata can prevent recovery. Keep the owner phone online while the service processes the request.
+
 If an administrator already has an original file, restore that one attachment while the service is stopped:
 
 ```sh

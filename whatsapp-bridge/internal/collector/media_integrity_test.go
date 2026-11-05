@@ -25,6 +25,17 @@ import (
 
 type fixtureMediaTransport struct{ body []byte }
 
+type retryFixtureMediaTransport struct {
+	bodies [][]byte
+	calls  int
+}
+
+func (f *retryFixtureMediaTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	index := f.calls
+	f.calls++
+	return (fixtureMediaTransport{f.bodies[index]}).RoundTrip(request)
+}
+
 func (f fixtureMediaTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	return &http.Response{
 		StatusCode: http.StatusOK, Header: make(http.Header), Request: request,
@@ -120,5 +131,47 @@ func TestPinnedLibraryStreamingIntegrityWithSyntheticHTTP(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestMediaHostRetryResetsBoundedCiphertextFile(t *testing.T) {
+	plaintext := []byte("Synthetic retry fixture.")
+	key := bytes.Repeat([]byte{3}, 32)
+	encrypted := encryptedMediaFixture(t, plaintext, key)
+	wrong := append([]byte(nil), encrypted...)
+	wrong[0] ^= 1
+	plainHash, encHash := sha256.Sum256(plaintext), sha256.Sum256(encrypted)
+	cfg := config.Default()
+	cfg.AllowedChats = []config.Chat{{JID: allowedChat, Label: "Synthetic"}}
+	s, err := archive.Open(filepath.Join(t.TempDir(), "archive.db"), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	d := archive.AttachmentDescriptor{DirectPath: "/v/synthetic.enc?fixture=1", MediaType: "document", FileLength: int64(len(plaintext)), MediaKey: key, FileSHA256: plainHash[:], FileEncSHA256: encHash[:]}
+	row := archive.Message{ID: "host-retry", ChatJID: allowedChat, Sender: allowedChat, Timestamp: time.Now().Unix(), MediaType: "document"}
+	if err := s.IngestWithAttachments([]archive.Message{row}, []archive.AttachmentRecord{{ChatJID: allowedChat, MessageID: row.ID, Descriptor: d}}); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := s.PendingAttachments(1)
+	if err != nil || len(jobs) != 1 {
+		t.Fatal("missing retry fixture job")
+	}
+	transport := &retryFixtureMediaTransport{bodies: [][]byte{wrong, encrypted}}
+	client := whatsmeow.NewClient(store.NoopDevice, waLog.Noop)
+	client.SetMediaHTTPClient(&http.Client{Transport: mediaGuard{transport}})
+	err = s.CacheAttachment(context.Background(), jobs[0], func(ctx context.Context, file archive.AttachmentFile) error {
+		ctx = context.WithValue(ctx, mediaFileContextKey{}, file)
+		first := client.DangerousInternals().DownloadAndDecryptToFile(ctx, "https://mmg.whatsapp.net/v/first", key, whatsmeow.MediaDocument, encHash[:], plainHash[:], file)
+		if !errors.Is(first, whatsmeow.ErrInvalidMediaEncSHA256) {
+			t.Fatal("first host did not reject corrupt ciphertext")
+		}
+		return client.DangerousInternals().DownloadAndDecryptToFile(ctx, "https://media.cdn.whatsapp.net/v/second", key, whatsmeow.MediaDocument, encHash[:], plainHash[:], file)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := s.GetAttachmentInfo(allowedChat, row.ID); err != nil || info.Status != "ready" || transport.calls != 2 {
+		t.Fatal("second verified host was not cached")
 	}
 }

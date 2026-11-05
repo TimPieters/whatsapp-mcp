@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"net/url"
+	"strings"
 	"time"
 	"unicode"
 
@@ -26,7 +27,14 @@ type mediaDownload func(context.Context, archive.AttachmentDescriptor, archive.A
 // No imported absolute URL is passed to the network library.
 type downloadable struct{ archive.AttachmentDescriptor }
 
-func (d downloadable) GetDirectPath() string    { return d.DirectPath }
+func (d downloadable) GetDirectPath() string {
+	// The pinned library appends media query fields with '&'. Keep a queryless
+	// authenticated path intact while supplying the required separator.
+	if !strings.Contains(d.DirectPath, "?") {
+		return d.DirectPath + "?"
+	}
+	return d.DirectPath
+}
 func (d downloadable) GetMediaKey() []byte      { return d.MediaKey }
 func (d downloadable) GetFileSHA256() []byte    { return d.FileSHA256 }
 func (d downloadable) GetFileEncSHA256() []byte { return d.FileEncSHA256 }
@@ -153,6 +161,8 @@ func (c *Collector) prefetchLoop(ctx context.Context) {
 	for {
 		c.expireMediaRecoveries()
 		c.processMediaRecoveryRequest(ctx)
+		c.expireMessageCopies()
+		c.processMessageCopyRequest(ctx)
 		c.prefetchAvailable(ctx)
 		select {
 		case <-ctx.Done():
@@ -185,7 +195,7 @@ func (c *Collector) prefetchAvailable(ctx context.Context) {
 		})
 		cancel()
 		if err != nil && ctx.Err() == nil {
-			c.logger.Warn("attachment prefetch could not complete")
+			c.logger.Warn("attachment prefetch could not complete", "reason", attachmentErrorReason(err))
 		}
 	}
 }

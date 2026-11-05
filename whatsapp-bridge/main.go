@@ -43,7 +43,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: whatsapp-mcp <init|serve|allow|deny|qr|recover-attachments|restore-attachment|export-upstream|import|version> [options]")
+		return errors.New("usage: whatsapp-mcp <init|serve|allow|deny|qr|recover-attachments|recover-message-copies|restore-attachment|export-upstream|import|version> [options]")
 	}
 	if args[0] == "version" {
 		fmt.Println(version)
@@ -103,7 +103,7 @@ func run(args []string) error {
 		}
 		fmt.Println("Attachment verified and available in the approved cache.")
 		return nil
-	case "recover-attachments":
+	case "recover-attachments", "recover-message-copies":
 		cfg, err := loadConfig(*configPath)
 		if err != nil {
 			return err
@@ -111,15 +111,19 @@ func run(args []string) error {
 		if len(cfg.AllowedChats) == 0 {
 			return errors.New("approve chats before requesting attachment recovery")
 		}
-		if _, err := os.Lstat(filepath.Join(cfg.DataDir, "media-recovery.processing")); err == nil {
+		requestName, requestContent, processingName := collector.MediaRecoveryRequestName, collector.MediaRecoveryRequestContent, "media-recovery.processing"
+		if args[0] == "recover-message-copies" {
+			requestName, requestContent, processingName = collector.MessageCopyRequestName, collector.MessageCopyRequestContent, "message-copy.processing"
+		}
+		if _, err := os.Lstat(filepath.Join(cfg.DataDir, processingName)); err == nil {
 			return errors.New("an attachment recovery request is already processing")
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return errors.New("cannot inspect the private recovery state")
 		}
-		if err := writeNew(filepath.Join(cfg.DataDir, collector.MediaRecoveryRequestName), []byte(collector.MediaRecoveryRequestContent)); err != nil {
+		if err := writeNew(filepath.Join(cfg.DataDir, requestName), []byte(requestContent)); err != nil {
 			return errors.New("cannot queue recovery; run as the state owner and check for an existing request")
 		}
-		fmt.Println("Queued bounded owner-phone media recovery for eligible failed attachments. The connected service will process it; files absent from the phone may remain unavailable.")
+		fmt.Println("Queued bounded owner-phone recovery for eligible failed attachments. The connected service will process it; files absent from the phone may remain unavailable.")
 		return nil
 	case "qr":
 		cfg, err := loadConfig(*configPath)
@@ -488,8 +492,10 @@ func removePairingFiles(dir string) error {
 // Call only after the exclusive daemon state lock is held. The archive's durable
 // per-file attempt flags remain intact; a crash must not cause repeated receipts.
 func removeStaleRecoveryProcessing(dir string) error {
-	if err := os.Remove(filepath.Join(dir, "media-recovery.processing")); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return errors.New("could not clear stale private recovery processing marker")
+	for _, name := range []string{"media-recovery.processing", "message-copy.processing"} {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return errors.New("could not clear stale private recovery processing marker")
+		}
 	}
 	return nil
 }

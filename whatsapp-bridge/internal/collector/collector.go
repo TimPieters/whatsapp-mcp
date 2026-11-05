@@ -17,6 +17,7 @@ import (
 	"whatsapp-client/internal/archive"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -40,21 +41,25 @@ type messageStore interface {
 // Collector receives approved messages and prefetches their bounded attachments.
 // It has no application operation for sending messages.
 type Collector struct {
-	client         *whatsmeow.Client
-	session        *sqlstore.Container
-	archive        messageStore
-	logger         *slog.Logger
-	paired         atomic.Bool
-	handlerID      uint32
-	attachments    attachmentStore
-	download       mediaDownload
-	mediaWake      chan struct{}
-	mediaHTTP      *http.Transport
-	dataDir        string
-	recoveryMu     sync.Mutex
-	recoveries     map[string]pendingRecovery
-	recoveryStats  map[string]int
-	sendMediaRetry func(context.Context, *types.MessageInfo, []byte) error
+	client          *whatsmeow.Client
+	session         *sqlstore.Container
+	archive         messageStore
+	logger          *slog.Logger
+	paired          atomic.Bool
+	handlerID       uint32
+	attachments     attachmentStore
+	download        mediaDownload
+	mediaWake       chan struct{}
+	mediaHTTP       *http.Transport
+	dataDir         string
+	recoveryMu      sync.Mutex
+	recoveries      map[string]pendingRecovery
+	recoveryStats   map[string]int
+	sendMediaRetry  func(context.Context, *types.MessageInfo, []byte) error
+	copyMu          sync.Mutex
+	messageCopies   map[string]pendingMessageCopy
+	copyStats       map[string]int
+	sendMessageCopy func(context.Context, *waE2E.Message) (string, error)
 
 	lifecycle sync.Mutex
 	started   bool
@@ -130,9 +135,14 @@ func New(dataDir string, archiveStore *archive.Store, logger *slog.Logger) (*Col
 	client.SetMediaHTTPClient(mediaClient)
 	c.mediaHTTP = transport
 	c.download = func(ctx context.Context, descriptor archive.AttachmentDescriptor, file archive.AttachmentFile) error {
+		ctx = context.WithValue(ctx, mediaFileContextKey{}, file)
 		return client.DownloadToFile(ctx, downloadable{descriptor}, file)
 	}
 	c.sendMediaRetry = client.SendMediaRetryReceipt
+	c.sendMessageCopy = func(ctx context.Context, message *waE2E.Message) (string, error) {
+		response, err := client.SendPeerMessage(ctx, message)
+		return response.ID, err
+	}
 	c.paired.Store(device.ID != nil)
 	c.handlerID = client.AddEventHandler(c.handleEvent)
 	return c, nil

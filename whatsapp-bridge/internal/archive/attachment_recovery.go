@@ -24,9 +24,11 @@ func (s *Store) initAttachmentRecovery() error {
 	}
 	if found == 0 {
 		_, err := s.db.Exec("ALTER TABLE attachments ADD COLUMN phone_retry_attempted INTEGER NOT NULL DEFAULT 0")
-		return err
+		if err != nil {
+			return err
+		}
 	}
-	return nil
+	return s.initAttachmentMessageCopy()
 }
 
 // ClaimAttachmentRecoveries authorizes at most one owner-device retry per

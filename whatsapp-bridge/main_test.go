@@ -9,42 +9,53 @@ import (
 )
 
 func TestRecoveryCommandIsPrivateAndDoesNotOverwriteRequests(t *testing.T) {
+	for _, command := range []string{"recover-attachments", "recover-message-copies"} {
+		t.Run(command, func(t *testing.T) { testRecoveryCommand(t, command) })
+	}
+}
+
+func testRecoveryCommand(t *testing.T, command string) {
+	t.Helper()
+	requestName, requestContent, processingName := collector.MediaRecoveryRequestName, collector.MediaRecoveryRequestContent, "media-recovery.processing"
+	if command == "recover-message-copies" {
+		requestName, requestContent, processingName = collector.MessageCopyRequestName, collector.MessageCopyRequestContent, "message-copy.processing"
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(`{"data_dir":".","allowed_chats":[]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{"recover-attachments", "--config", path}); err == nil {
+	if err := run([]string{command, "--config", path}); err == nil {
 		t.Fatal("empty allowlist queued recovery")
 	}
 	if err := changeAllowed(path, "15551234567@s.whatsapp.net", "Example", true); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{"recover-attachments", "--config", path}); err != nil {
+	if err := run([]string{command, "--config", path}); err != nil {
 		t.Fatal(err)
 	}
-	marker := filepath.Join(dir, collector.MediaRecoveryRequestName)
+	marker := filepath.Join(dir, requestName)
 	data, err := os.ReadFile(marker)
-	if err != nil || string(data) != collector.MediaRecoveryRequestContent {
+	if err != nil || string(data) != requestContent {
 		t.Fatal("invalid recovery request")
 	}
-	if err := run([]string{"recover-attachments", "--config", path}); err == nil {
+	if err := run([]string{command, "--config", path}); err == nil {
 		t.Fatal("duplicate recovery request accepted")
 	}
 	if err := os.Remove(marker); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "media-recovery.processing"), []byte("active"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, processingName), []byte("active"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{"recover-attachments", "--config", path}); err == nil {
+	if err := run([]string{command, "--config", path}); err == nil {
 		t.Fatal("processing request bypassed")
 	}
 }
 
 func TestRecoveryStartupCleanupPreservesPendingRequest(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{collector.MediaRecoveryRequestName, "media-recovery.processing"} {
+	for _, name := range []string{collector.MediaRecoveryRequestName, collector.MessageCopyRequestName, "media-recovery.processing", "message-copy.processing"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(collector.MediaRecoveryRequestContent), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -52,11 +63,15 @@ func TestRecoveryStartupCleanupPreservesPendingRequest(t *testing.T) {
 	if err := removeStaleRecoveryProcessing(dir); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "media-recovery.processing")); !os.IsNotExist(err) {
-		t.Fatal("stale processing marker remains")
+	for _, name := range []string{"media-recovery.processing", "message-copy.processing"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatal("stale processing marker remains")
+		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, collector.MediaRecoveryRequestName)); err != nil {
-		t.Fatal("pending request removed")
+	for _, name := range []string{collector.MediaRecoveryRequestName, collector.MessageCopyRequestName} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatal("pending request removed")
+		}
 	}
 }
 

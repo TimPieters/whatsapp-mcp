@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -256,6 +257,24 @@ func TestMediaDescriptorRejectsUnsafePathsAndMissingIntegrity(t *testing.T) {
 	}
 	if !validMediaDescriptor(mediaDescriptor()) {
 		t.Fatal("valid descriptor rejected")
+	}
+}
+
+func TestMediaDownloadQuerySeparatorDoesNotChangePersistedPath(t *testing.T) {
+	for _, path := range []string{"/v/fixture.enc", "/o1/v/fixture.enc?token=fixture"} {
+		d := mediaDescriptor()
+		d.DirectPath = path
+		requestPath := (downloadable{d}).GetDirectPath()
+		full, err := url.Parse("https://mmg.whatsapp.net" + requestPath + "&hash=fixture&mms-type=document")
+		if err != nil || full.Query().Get("hash") != "fixture" || strings.Contains(full.Path, "&hash=") {
+			t.Fatal("media query was appended to the filename")
+		}
+		if d.DirectPath != path {
+			t.Fatal("download normalization changed stored descriptor")
+		}
+		if strings.Contains(path, "?") && requestPath != path {
+			t.Fatal("existing authenticated query changed")
+		}
 	}
 }
 
